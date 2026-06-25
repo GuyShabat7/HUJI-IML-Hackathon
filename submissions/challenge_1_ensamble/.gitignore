@@ -1,0 +1,6 @@
+# Cached intermediate frames built by data.py (rebuildable from dataset/train_set.csv)
+_cache/
+
+# Trained artifacts (also covered by the repo-root .gitignore)
+weights.joblib
+__pycache__/

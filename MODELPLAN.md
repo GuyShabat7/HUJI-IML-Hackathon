@@ -111,16 +111,22 @@ These come straight from the EDA and directly shape the implementation:
 
 The target does not exist in the raw data; **build it by aggregation**, reconstructing zero hours.
 
-- [ ] **Local split:** reuse [make_local_split.py](make_local_split.py) — per-city time-based holdout
-  (latest 20% per city). A random split leaks the future.
-- [ ] **Station-hour + zero reconstruction:** follow the pattern already in
+- [x] **Local split:** per-city time-based holdout (latest 20% per city), same per-city quantile cut as
+  [make_local_split.py](make_local_split.py). A random split leaks the future. → `data.load_splits()`.
+- [x] **Station-hour + zero reconstruction:** follows the
   [`submissions/challenge_1_IDs/train.py`](submissions/challenge_1_IDs/train.py) `build_training_table()`
-  / the helpers in [build_station_hour_eval_data.py](build_station_hour_eval_data.py)
-  (`make_active_window_station_hour_grid`, `add_station_hour_keys`, `normalize_station_id`). Keep daytime
-  hours `06:00–22:00` and add back empty hours inside each station's active window as `demand = 0`.
-- [ ] **Labeled validation set:** convert the held-out slice with `build_station_hour_eval_data.py`
-  (`--public_targets_csv` / `--private_labels_csv`) and **join on `id`** to get features + labels.
-- [ ] Cache intermediate frames under `submissions/challenge_1_ensamble/_cache/` (gitignored).
+  pattern (daytime hours `06:00–22:00`, empty hours inside each station's active window added as
+  `demand = 0`). → `data.build_station_hour_table()`.
+- [x] **Labeled validation set:** built **directly** — `build_station_hour_table` already attaches `demand`
+  to every station-hour, so `load_splits().val` carries features + labels in-memory (equivalent to the
+  `build_station_hour_eval_data.py` public/private + join-on-`id` route, without the CSV round-trip).
+  - [x] **Supplementary-data check (per request):** the harness reads **only** `dataset/train_set.csv`.
+        It does **not** pull the full-year London release ([README §Supplementary Data](README.md#supplementary-data--full-year-london))
+        — that data is London-only, opt-in, and rules-gated, with **no** equivalent for city 3. **City 3
+        stays a genuine unknown**: held out whole as `test_unseen` and protected by a hard leakage guard in
+        `load_splits` so no enriched/extended source can ever carry city-3 rows into train/val.
+- [x] Cache intermediate frames under `submissions/challenge_1_ensamble/_cache/` (gitignored). →
+  signature-checked `data.build_or_load_table()` (rebuilds only when `train_set.csv` changes).
 
 ---
 
@@ -163,10 +169,20 @@ fixed `predict.py` from `challenge_1_IDs` unchanged.
 > 3 base models + orchestrator map cleanly onto the team. Claim a section by adding your name.
 
 ### Dev 1 — Data & validation harness  ([data pipeline §5], [validation §6])
-> 🚧 **IN PROGRESS — claude (2026-06-25).** Building `submissions/challenge_1_ensamble/data.py`.
-- [ ] Labeled station-hour builder with zero reconstruction (reuse `build_training_table` pattern).
-- [ ] Per-city time split (reuse `make_local_split.py`); city-3-held-out + c1/c2 temporal holdout.
-- [ ] Caching + a `load_splits()` helper the others can import.
+> ✅ **DONE — claude (2026-06-25).** Implemented in [`submissions/challenge_1_ensamble/data.py`](submissions/challenge_1_ensamble/data.py)
+> (self-contained: numpy/pandas/joblib only). Smoke-tested: builds in ~5s, reloads from cache in ~0.4s;
+> split invariants verified (no temporal leak, no train/val overlap, exact row coverage). §4 caveats
+> confirmed to carry through (London POI all-zero & rail==-1 at 100%, LA lat/lng 100% missing).
+> Reads **only** `train_set.csv` (no supplementary London data) and a hard guard keeps **city 3 a genuine
+> unknown** — held out whole, never in train/val even if an enriched source is later passed in.
+- [x] Labeled station-hour builder with zero reconstruction (reuse `build_training_table` pattern). → `build_station_hour_table()`
+- [x] Per-city time split (reuse `make_local_split.py`); city-3-held-out + c1/c2 temporal holdout. → `load_splits()` returns `Splits(train, val, test_unseen)`
+- [x] Caching + a `load_splits()` helper the others can import. → `build_or_load_table()` (signature-checked `_cache/`, gitignored) + `city_balanced_weights()` helper
+
+> **For Dev 2/3:** `from data import load_splits, city_balanced_weights, WEATHER_COLS, CALENDAR_COLS, STATION_META_COLS`.
+> The table carries `city_key`/`city` (train-time only — split/weight/report, never a feature), `ts`,
+> `demand`, and all raw weather/calendar/station-meta columns; `holiday`/`rail==-1`/all-POI-zero are kept
+> **as-is** so the missingness-mask logic (§4) lives in `model.py`, not here.
 
 ### Dev 2 — Shared features + M_weather + M_calendar  ([§3], [§4])
 - [ ] `CATEGORY_FEATURES`, `build_category_matrix(df, cat)`, `category_missingness(df, cat)` in `model.py`
