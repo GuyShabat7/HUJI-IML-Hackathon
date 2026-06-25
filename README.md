@@ -146,6 +146,62 @@ per-city `*_station_features.csv` (POI) and `*_weather_2025.csv`, plus `enrich.p
 
 ---
 
+## Models, evaluation harness & unseen-city test
+
+Two submissions live under `submissions/`:
+
+| Folder | Model | Role |
+|---|---|---|
+| `challenge_1_IDs/` | LightGBM (poisson + L1), with station/city **target encodings** + lat/lng | **safety-net baseline** (do not modify) |
+| `challenge_1_ensamble/` | **Missingness-aware XGBoost ensemble** — 3 category base models + learned-gate orchestrator, **no identity/location features** | intended final submission |
+
+### The XGBoost ensemble (`challenge_1_ensamble/model.py`)
+```
+M_weather  (8 Open-Meteo cols)        ┐
+M_calendar (cyclical time + flags)    ├─ base XGBoost regressors (count:poisson)
+M_station  (built-environment POI)    ┘
+                 │  per-category missingness masks (also catch London's all-zero-POI sentinel)
+                 ▼
+        ORCHESTRATOR (XGBoost gate over [predW,predC,predS, missW,missC,missS])
+                 ▼   cold-start → non-spatial hour×weekday median fallback
+            max(0, demand)
+```
+The orchestrator is trained on **out-of-fold** base predictions (no leakage) and learns to
+down-weight a base model whose inputs are absent/uninformative for a row. It deliberately
+uses **no identity/location features** — chosen *empirically* (not by dogma) because the
+grade includes a brand-new unseen city. All feature code is shared via `features.py`.
+
+### Shared evaluation harness (`tools/`)
+- `tools/eval_local.py` — trains any submission on the held-out split (cities 1+2; **city 3
+  held out whole**) and reports per-city + **blended** MAE = ⅔·mean(c1,c2) + ⅓·c3.
+- `tools/bakeoff.py` — the measurement that drove the no-identity decision (full recipe):
+
+  | contender | MAE c1 | MAE c2 | MAE c3 (unseen) | blended |
+  |---|---|---|---|---|
+  | A baseline (identity + TE) | 0.985 | 0.568 | 1.142 | 0.898 |
+  | **B no_identity** | 1.199 | 0.596 | **0.579** | **0.791** |
+  | C transferable + fallback-TE | 0.972 | 0.568 | 0.875 | 0.805 |
+
+  Removing identity features roughly halves the unseen-city error (city 3: 1.14 → 0.58),
+  which is what generalizing to the hidden grading city needs.
+
+### Unseen 4th-city test — Chicago (`city 4`)
+To estimate performance on the hidden grading city we fetch a **genuinely unseen** city,
+**Chicago/Divvy**, label it `city 4`, enrich it to the exact `train_set.csv` schema, and
+score the model on it — **never** letting it (or `city 3`) into train/val (hard leakage
+guard in `data.py` + `score_holdout.py`):
+```
+python tools/fetch_chicago_divvy.py
+python tools/enrich_city.py dataset/chicago_holdout_start.csv --name chicago \
+       --poi-pbf dataset/_cache/illinois.osm.pbf       # Open-Meteo weather + OSM POI + calendar
+python tools/score_holdout.py --submission submissions/challenge_1_ensamble \
+       --enriched dataset/chicago_enriched.csv          # prints city1/2/3 + city4 MAE
+```
+`tools/enrich_city.py` reproduces every `train_set.csv` feature column (verified
+name-for-name); see `tools/README.md`. Cluster wrappers: `cluster/run_*.slurm` (Phoenix).
+
+---
+
 ## Dataset at a Glance
 
 | Property | Value |
