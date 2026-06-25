@@ -163,6 +163,7 @@ fixed `predict.py` from `challenge_1_IDs` unchanged.
 > 3 base models + orchestrator map cleanly onto the team. Claim a section by adding your name.
 
 ### Dev 1 — Data & validation harness  ([data pipeline §5], [validation §6])
+> 🚧 **IN PROGRESS — claude (2026-06-25).** Building `submissions/challenge_1_ensamble/data.py`.
 - [ ] Labeled station-hour builder with zero reconstruction (reuse `build_training_table` pattern).
 - [ ] Per-city time split (reuse `make_local_split.py`); city-3-held-out + c1/c2 temporal holdout.
 - [ ] Caching + a `load_splits()` helper the others can import.
