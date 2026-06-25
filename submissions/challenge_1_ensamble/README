@@ -1,0 +1,51 @@
+# Challenge 1 — Missingness-Aware XGBoost Ensemble
+
+> Team final-model folder. Rename to `challenge_1_<ID1>_<ID2>` and fill names/IDs below
+> for the actual course submission. The LightGBM model in `../challenge_1_IDs/` is the
+> safety-net baseline; this is the intended submission.
+
+**Team:** <NAME 1> (<ID 1>), <NAME 2> (<ID 2>)
+
+## Approach
+Predicts station-hour demand (rides starting at a `(city, station, hour)`) with a
+**missingness-aware XGBoost ensemble** that uses **no identity / location features** —
+chosen empirically because the challenge grades a brand-new unseen city (`city 4`), and an
+identity-free model generalizes there far better (validated by `tools/bakeoff.py`).
+
+```
+M_weather  (8 Open-Meteo cols)        ┐
+M_calendar (cyclical time + flags)    ├─ 3 base XGBoost regressors (count:poisson)
+M_station  (built-environment POI)    ┘
+                 │  per-category missingness masks (also catch the London all-zero-POI sentinel)
+                 ▼
+        ORCHESTRATOR (XGBoost learned gate over [predW,predC,predS, missW,missC,missS])
+                 ▼   cold-start → non-spatial hour×weekday median fallback
+            max(0, demand)
+```
+
+- The **orchestrator** learns to down-weight a base model whose inputs are absent/uninformative
+  for a row (XGBoost handles NaN natively); trained on **out-of-fold** base predictions (no leakage).
+- All feature code lives in `features.py` (shared by `train.py` and `predict.py` via `model.py`).
+- Missingness rules (`features.apply_missingness`): `distance_to_nearest_rail_station == -1`
+  and all-POI-zero stations → NaN, so London's empty metadata is treated as missing, not real.
+
+## Files
+- `model.py` — `BikeDemandModel` (+ `train_artifacts`), all shared feature/prediction logic.
+- `train.py` — reads `../../dataset/train_set.csv`, builds the station-hour table
+  (`data.py`, with zero reconstruction), trains the ensemble, writes `weights.joblib`.
+- `predict.py` — fixed evaluator wrapper (`Model(BaseModel)`), unchanged.
+- `features.py`, `data.py` — shared feature builders and the split/table harness.
+
+## Run
+```
+cd submissions/challenge_1_ensamble && python train.py      # writes weights.joblib
+# local evaluation (per-city + blended MAE, city 3 held out):
+python ../../tools/eval_local.py submissions/challenge_1_ensamble
+# unseen 4th-city probe (Chicago):
+python ../../tools/score_holdout.py --submission submissions/challenge_1_ensamble \
+       --enriched dataset/chicago_enriched.csv
+```
+
+## Measured performance
+See the repo `README.md` "Model results" section and `MODELPLAN.md` §9 for the
+bake-off table, per-city MAE (city 1/2/3 + Chicago city 4), and the decision log.

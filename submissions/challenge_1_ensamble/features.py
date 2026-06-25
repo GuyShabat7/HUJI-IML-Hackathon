@@ -143,3 +143,52 @@ def build_fallback_te_eval(eval_df: pd.DataFrame, enc: dict) -> pd.DataFrame:
     base = build_no_identity(eval_df)
     te = te_transform(eval_df, enc)
     return pd.concat([base, te], axis=1)
+
+
+# --------------------------------------------------------------------------- #
+# Per-category feature matrices for the missingness-aware XGBoost ensemble
+# (MODELPLAN §2-3): three base models, each on its own annotation category.
+# --------------------------------------------------------------------------- #
+def build_weather(df: pd.DataFrame) -> pd.DataFrame:
+    """M_weather inputs — the 8 Open-Meteo columns only."""
+    X = pd.DataFrame(index=df.index)
+    for c in WEATHER_COLS:
+        X[c] = pd.to_numeric(df[c], errors="coerce") if c in df.columns else np.nan
+    return X
+
+
+def build_calendar(df: pd.DataFrame) -> pd.DataFrame:
+    """M_calendar inputs — cyclical/temporal + calendar flags (no weather, no POI)."""
+    X = _time_features(df)
+    for c in CALENDAR_FLAGS:
+        X[c] = pd.to_numeric(df[c], errors="coerce") if c in df.columns else np.nan
+    return X
+
+
+def build_station(df: pd.DataFrame) -> pd.DataFrame:
+    """M_station inputs — built-environment POI only (missingness-aware)."""
+    d = apply_missingness(df)
+    X = pd.DataFrame(index=df.index)
+    for c in POI_COLS:
+        X[c] = pd.to_numeric(d[c], errors="coerce") if c in d.columns else np.nan
+    return X
+
+
+def category_missingness(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-row missingness masks the orchestrator gates on (1 = category absent/uninformative).
+
+    Catches 'present-but-uninformative' too (MODELPLAN §4): a station row whose POI is the
+    all-zero London sentinel counts as missing even though it is not literally NaN.
+    """
+    d = apply_missingness(df)
+    M = pd.DataFrame(index=df.index)
+    wx = [c for c in WEATHER_COLS if c in d.columns]
+    M["miss_weather"] = (d[wx].apply(pd.to_numeric, errors="coerce").isna().all(axis=1).astype(int)
+                         if wx else 1)
+    poi = [c for c in _POI_PRESENCE if c in d.columns]
+    M["miss_station"] = (d[poi].apply(pd.to_numeric, errors="coerce").isna().all(axis=1).astype(int)
+                         if poi else 1)
+    flags = [c for c in CALENDAR_FLAGS if c in d.columns]
+    M["miss_calendar"] = (d[flags].apply(pd.to_numeric, errors="coerce").isna().any(axis=1).astype(int)
+                          if flags else 1)
+    return M
