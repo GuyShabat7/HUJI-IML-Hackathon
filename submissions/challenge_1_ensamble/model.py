@@ -77,21 +77,57 @@ def _ensure_ts(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _orch_matrix(df, base_models, base_cols):
-    """Stack base predictions + missingness masks into the orchestrator's input matrix."""
+def _ensure_keys(df):
+    """Add station_key / city_key / how (needed for the fallback target encodings).
+
+    No-op for the training table (already has them); for grader rows it derives them from
+    start_station_id / city / ts.
+    """
+    out = df
+    if "station_key" not in out.columns:
+        col = "start_station_id" if "start_station_id" in out.columns else (
+            "station_id" if "station_id" in out.columns else None)
+        if col is None:
+            out["station_key"] = "__missing_station__"
+        else:
+            raw = out[col].astype("string").str.strip()
+            num = pd.to_numeric(raw, errors="coerce")
+            il = num.notna() & np.isfinite(num) & (num % 1 == 0)
+            sk = raw.copy(); sk.loc[il] = num.loc[il].astype("int64").astype("string")
+            out["station_key"] = sk.fillna("__missing_station__")
+    if "city_key" not in out.columns:
+        out["city_key"] = (out["city"].astype("string").fillna("__missing_city__")
+                           if "city" in out.columns else "__all__")
+    if "how" not in out.columns:
+        out["how"] = out["ts"].dt.weekday * 24 + out["ts"].dt.hour
+    return out
+
+
+def _orch_matrix(df, a):
+    """Base predictions + missingness masks + fallback target encodings -> orchestrator inputs.
+
+    The hierarchical TE (station -> city -> global, fit on train) gives strong per-station
+    signal on SEEN cities; ``miss_identity`` flags a row whose station/city is unknown (an
+    unseen city), so the gate can learn to ignore the TE there.
+    """
     preds = {}
     for c in CATS:
-        X = _BUILDERS[c](df).reindex(columns=base_cols[c])
-        preds[f"pred_{c}"] = base_models[c].predict(X)
+        X = _BUILDERS[c](df).reindex(columns=a["base_cols"][c])
+        preds[f"pred_{c}"] = a["base_models"][c].predict(X)
     miss = F.category_missingness(df).reset_index(drop=True)
+    te = F.te_transform(df, a["te_enc"]).reset_index(drop=True)
+    miss_id = (~df["station_key"].isin(a["te_enc"]["station"])).astype(int).to_numpy()
     Z = pd.DataFrame(preds)
     for col in ("miss_weather", "miss_calendar", "miss_station"):
         Z[col] = miss[col].to_numpy()
+    for col in F.TE_COLS:
+        Z[col] = te[col].to_numpy()
+    Z["miss_identity"] = miss_id
     return Z
 
 
 def train_artifacts(train_df: pd.DataFrame, n_jobs: int = -1, seed: int = 42,
-                    n_estimators: int | None = None, n_mask_augment: int = 0,
+                    n_estimators: int | None = None, n_mask_augment: int = 1,
                     device: str = "auto") -> dict:
     """Fit the 3 base models + the orchestrator. Returns the artifacts dict for predict.
 
@@ -110,12 +146,15 @@ def train_artifacts(train_df: pd.DataFrame, n_jobs: int = -1, seed: int = 42,
     if n_estimators:
         base_params["n_estimators"] = int(n_estimators)
 
-    df = _ensure_ts(train_df).reset_index(drop=True)
+    df = _ensure_keys(_ensure_ts(train_df)).reset_index(drop=True)
     y = df["demand"].astype(float).to_numpy()
     base_cols = {c: list(_BUILDERS[c](df).columns) for c in CATS}
+    te_enc = F.te_fit(df)                                   # deployment encodings
 
-    # 1) Out-of-fold base predictions -> leakage-free orchestrator training data.
+    # 1) Out-of-fold base preds + out-of-fold fallback TE -> leakage-free orchestrator data.
     oof = {f"pred_{c}": np.zeros(len(df)) for c in CATS}
+    oof_te = pd.DataFrame(index=df.index, columns=F.TE_COLS, dtype=float)
+    oof_miss_id = np.zeros(len(df), dtype=int)
     kf = KFold(n_splits=3, shuffle=True, random_state=seed)
     for tr, va in kf.split(df):
         for c in CATS:
@@ -124,22 +163,36 @@ def train_artifacts(train_df: pd.DataFrame, n_jobs: int = -1, seed: int = 42,
             m = xgb.XGBRegressor(n_jobs=n_jobs, **base_params)
             m.fit(Xtr, y[tr])
             oof[f"pred_{c}"][va] = m.predict(Xva)
+        enc_fold = F.te_fit(df.iloc[tr])
+        oof_te.iloc[va] = F.te_transform(df.iloc[va], enc_fold).to_numpy()
+        oof_miss_id[va] = (~df.iloc[va]["station_key"].isin(enc_fold["station"])).astype(int).to_numpy()
+
     miss = F.category_missingness(df).reset_index(drop=True)
     Zoof = pd.DataFrame(oof)
     for col in ("miss_weather", "miss_calendar", "miss_station"):
         Zoof[col] = miss[col].to_numpy()
+    for col in F.TE_COLS:
+        Zoof[col] = oof_te[col].to_numpy()
+    Zoof["miss_identity"] = oof_miss_id
 
-    # optional missingness augmentation: teach the gate to handle an absent category
+    # missingness augmentation: teach the gate to cope when a whole channel is absent,
+    # INCLUDING identity (unseen city) -> it must lean on weather/calendar there.
     Zfit, yfit = Zoof, y
     if n_mask_augment > 0:
+        g = te_enc["global"]
         miss_of = {"weather": "miss_weather", "calendar": "miss_calendar", "station": "miss_station"}
         parts_Z, parts_y = [Zoof], [y]
         for _ in range(int(n_mask_augment)):
             for c in CATS:
                 Zc = Zoof.copy()
-                Zc[f"pred_{c}"] = float(np.mean(oof[f"pred_{c}"]))  # neutralise this category
+                Zc[f"pred_{c}"] = float(np.mean(oof[f"pred_{c}"]))   # neutralise this category
                 Zc[miss_of[c]] = 1
                 parts_Z.append(Zc); parts_y.append(y)
+            Zi = Zoof.copy()                                          # identity-absent (unseen city)
+            for col in F.TE_COLS:
+                Zi[col] = g                                          # TE collapses to global prior
+            Zi["miss_identity"] = 1
+            parts_Z.append(Zi); parts_y.append(y)
         Zfit = pd.concat(parts_Z, ignore_index=True)
         yfit = np.concatenate(parts_y)
 
@@ -154,11 +207,11 @@ def train_artifacts(train_df: pd.DataFrame, n_jobs: int = -1, seed: int = 42,
         m.fit(X, y)
         base_models[c] = m
 
-    # global fallback (non-spatial): median demand by hour-of-day x weekday over c1+c2.
+    # non-spatial cold-start fallback: median demand by hour-of-day x weekday.
     fb = df.assign(_h=df["ts"].dt.hour, _w=df["ts"].dt.weekday)
     fallback = fb.groupby(["_w", "_h"])["demand"].median().to_dict()
     return {
-        "base_models": base_models, "base_cols": base_cols,
+        "base_models": base_models, "base_cols": base_cols, "te_enc": te_enc,
         "orchestrator": orch, "orch_cols": list(Zoof.columns),
         "fallback_how_median": fallback, "global_median": float(np.median(y)),
     }
@@ -176,8 +229,8 @@ class BikeDemandModel:
     def predict(self, test_df: pd.DataFrame) -> np.ndarray:
         if self.a is None:
             raise RuntimeError("call load_artifacts() first")
-        df = _ensure_ts(test_df)                       # copy; never mutates test_df
-        Z = _orch_matrix(df, self.a["base_models"], self.a["base_cols"])
+        df = _ensure_keys(_ensure_ts(test_df))         # copy; never mutates test_df
+        Z = _orch_matrix(df, self.a)
         Z = Z.reindex(columns=self.a["orch_cols"])
         preds = self.a["orchestrator"].predict(Z).astype(float)
 

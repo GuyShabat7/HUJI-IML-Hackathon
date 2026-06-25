@@ -28,7 +28,7 @@ def main() -> None:
                     help="quick iteration: small trees + no mask augmentation (NOT for submission)")
     ap.add_argument("--n-estimators", type=int, default=None,
                     help="override base-model tree count (default: full recipe)")
-    ap.add_argument("--n-mask-augment", type=int, default=0,
+    ap.add_argument("--n-mask-augment", type=int, default=1,
                     help="missingness-augmentation rounds for the orchestrator (0 = off)")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"],
                     help="XGBoost device: auto (GPU if available) | cpu | cuda")
