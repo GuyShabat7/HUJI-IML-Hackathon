@@ -8,15 +8,17 @@ This is the single data entry point the other devs import. It:
      the raw ride-level data, mirroring the proven
      ``challenge_1_IDs/train.py:build_training_table`` pattern and the helpers in
      ``build_station_hour_eval_data.py`` (MODELPLAN.md §5).
-  2. Splits it into the three sets the project agreed on (MODELPLAN.md §6):
-        - TRAIN  : ``city 1`` + ``city 2``, earliest ``1 - val_fraction`` by time
-        - VAL    : ``city 1`` + ``city 2``, latest ``val_fraction`` by time
-                   (the in-distribution temporal holdout used for early stopping,
-                   model selection, and to produce the base preds that train the
-                   orchestrator)
+  2. Pools the official data with any approved **supplemental** sources (external
+     data is course-approved and ON by default — auto-discovered from
+     ``dataset/supplemental/``; see load_splits) and splits into (MODELPLAN.md §6):
+        - TRAIN  : in-distribution cities (``city 1`` + ``city 2``), earliest
+                   ``1 - val_fraction`` by time — official + supplemental
+        - VAL    : in-distribution cities, latest ``val_fraction`` by time —
+                   official + supplemental (early stopping, model selection, and
+                   the base preds that train the orchestrator)
         - TEST   : *all* of ``city 3`` — the never-trained-on "brand-new city"
-                   generalization probe
-  3. Caches the built table under ``_cache/`` (gitignored) so repeated calls are
+                   probe. The one hard rule: **city 3 is hidden during training.**
+  3. Caches built tables under ``_cache/`` (gitignored) so repeated calls are
      cheap, and exposes ``load_splits()`` + ``city_balanced_weights()`` helpers.
 
 Only depends on numpy / pandas / joblib (no xgboost), so it is cheap to import.
@@ -37,10 +39,11 @@ import numpy as np
 import pandas as pd
 
 __all__ = [
-    "DAYTIME_HOURS", "HOLDOUT_CITY", "VAL_FRACTION",
+    "DAYTIME_HOURS", "HOLDOUT_CITY", "VAL_FRACTION", "SUPPLEMENTAL_DIR",
     "WEATHER_COLS", "CALENDAR_COLS", "STATION_META_COLS",
     "normalize_station_id", "add_keys", "build_station_hour_table",
-    "build_or_load_table", "load_splits", "city_balanced_weights", "Splits",
+    "build_or_load_table", "discover_supplemental_sources",
+    "load_splits", "city_balanced_weights", "Splits",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -52,6 +55,13 @@ TRAIN_CSV = DATA_ROOT / "train_set.csv"
 CACHE_DIR = HERE / "_cache"
 TABLE_CACHE = CACHE_DIR / "station_hour_table.pkl"
 TABLE_CACHE_META = CACHE_DIR / "station_hour_table.meta.json"
+
+# Supplemental sources are ENABLED by default (course approved external data for
+# training + validation). Any train_set.csv-schema CSV dropped here is auto-merged
+# into the pool and split like official data — see load_splits(). The directory is
+# gitignored and may be empty/absent (then the harness falls back to train_set.csv
+# only). Produce sources with tools/build_supplementary_london.py (any city).
+SUPPLEMENTAL_DIR = DATA_ROOT / "supplemental"
 
 # Daytime hours kept by the evaluator (build_station_hour_eval_data.py uses
 # range(6, 23) == 06:00..22:00 inclusive). Match it so the reconstructed grid
@@ -275,39 +285,79 @@ class Splits:
         return pd.DataFrame(rows)
 
 
+def discover_supplemental_sources(directory: str | Path = SUPPLEMENTAL_DIR) -> list[Path]:
+    """All ``*.csv`` supplemental sources in ``directory`` (sorted; [] if absent).
+
+    Drop any number of train_set.csv-schema CSVs here (London, D.C., …) and they
+    are auto-merged by ``load_splits``. Empty/missing directory ⇒ official-only.
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return []
+    return sorted(p for p in directory.glob("*.csv") if p.is_file())
+
+
 def load_splits(
     train_csv: str | Path = TRAIN_CSV,
     val_fraction: float = VAL_FRACTION,
     holdout_city: str = HOLDOUT_CITY,
     use_cache: bool = True,
     rebuild: bool = False,
-    extra_train_csv: str | Path | None = None,
+    supplemental: str | list | None = "auto",
 ) -> Splits:
-    """Build (or load) the table and return the train / val / unseen-city splits.
+    """Build (or load) the pooled table and return train / val / unseen-city splits.
 
-    The temporal cut is taken *per city* (matching make_local_split.py) so each
-    in-distribution city contributes the same latest-``val_fraction`` slice; a
-    random split would leak the future. The holdout city is removed *before*
-    the temporal split and returned whole as ``test_unseen``.
+    Supplemental external data is **enabled by default** (course approved it for
+    training + validation). The official ``train_set.csv`` and every supplemental
+    source are concatenated into one pool, exact ``(city, station, hour)`` overlaps
+    are de-duplicated keeping the official row, then:
 
-    ``extra_train_csv`` (default ``None`` ⇒ no behavior change) is the OPT-IN hook
-    for supplementary data — e.g. the enriched full-year London produced by
-    ``tools/build_supplementary_london.py`` (rules-gated; see README §Supplementary
-    Data). It augments **TRAIN only**: ``val`` and ``test_unseen`` stay 100%
-    official data so the in-distribution holdout and the unseen-city probe remain
-    honest, and the holdout city is dropped from the extra source too. Station-hours
-    that already exist in the official train/val are removed from the extra source,
-    which both avoids double-counting and prevents any val timestamp leaking into
-    train. Splits gain an ``is_supplementary`` flag only when this is used.
+      - **city 3 (``holdout_city``) is pulled out whole** → ``test_unseen``. It is
+        the never-trained-on "brand-new city" probe and is used for testing/
+        validation only. The single hard rule — *city 3 stays hidden during
+        training* — is enforced by removing it before the split and by a guard.
+      - every other city is split by a **per-city temporal cut** (latest
+        ``val_fraction`` by time → ``val``; the rest → ``train``), matching
+        make_local_split.py. Supplemental rows take part in this split, so they
+        appear in **both train and val** (a clean temporal split on the union ⇒ no
+        train/val leakage). Every row carries an ``is_supplementary`` flag.
 
-    Caveat: because supplementary months can extend past the official val window,
-    the in-distribution London val loses its strict temporal-holdout meaning when
-    this hook is on — rely on the city-3 unseen-city MAE as the headline (§6).
+    ``supplemental``:
+        ``"auto"`` (default) — auto-discover CSVs in ``SUPPLEMENTAL_DIR``;
+        ``list`` of paths — use exactly those; ``None`` / ``[]`` — official only
+        (use this for the honest train_set-only baseline comparison, §9).
     """
-    table = build_or_load_table(train_csv, use_cache=use_cache, rebuild=rebuild)
+    official = build_or_load_table(train_csv, use_cache=use_cache, rebuild=rebuild)
+    official["is_supplementary"] = False
 
-    test_unseen = table[table["city_key"] == holdout_city].copy()
-    in_dist = table[table["city_key"] != holdout_city]
+    if supplemental == "auto":
+        sources = discover_supplemental_sources()
+    elif supplemental in (None, []):
+        sources = []
+    else:
+        sources = [Path(p) for p in supplemental]
+
+    frames = [official]
+    for src in sources:
+        extra = build_or_load_table(src, use_cache=use_cache, rebuild=rebuild)
+        extra["is_supplementary"] = True
+        frames.append(extra)
+
+    # Pool, then drop exact station-hour duplicates keeping the official copy
+    # (official is first, so keep="first" prefers it and its ground-truth demand).
+    keys = ["city_key", "station_key", "ts"]
+    pool = pd.concat(frames, ignore_index=True).drop_duplicates(subset=keys, keep="first")
+
+    if not (pool["city_key"] == holdout_city).any():
+        raise ValueError(
+            f"holdout_city {holdout_city!r} not found "
+            f"(present: {sorted(pool['city_key'].unique())})."
+        )
+
+    # Hard rule: city 3 is hidden during training. Pull it out whole *before* the
+    # split → only ever in test_unseen, never in train or val, regardless of source.
+    test_unseen = pool[pool["city_key"] == holdout_city].copy().reset_index(drop=True)
+    in_dist = pool[pool["city_key"] != holdout_city]
 
     train_parts, val_parts, cutoffs = [], [], {}
     for ck, g in in_dist.groupby("city_key", dropna=False):
@@ -320,42 +370,8 @@ def load_splits(
     train = pd.concat(train_parts).reset_index(drop=True)
     val = pd.concat(val_parts).reset_index(drop=True)
 
-    # Hard invariant: the holdout city must stay a genuine unknown. This catches a
-    # mistyped city name *and* any future enriched/extended source (e.g. full-year
-    # London, §4) that might accidentally carry city-3 rows into train/val.
-    if len(test_unseen) == 0:
-        raise ValueError(
-            f"holdout_city {holdout_city!r} not found in the table "
-            f"(present: {sorted(table['city_key'].unique())})."
-        )
-    leaked = set(train["city_key"]) | set(val["city_key"])
-    if holdout_city in leaked:
+    if holdout_city in (set(train["city_key"]) | set(val["city_key"])):
         raise AssertionError(f"holdout_city {holdout_city!r} leaked into train/val.")
-
-    # Opt-in supplementary augmentation (TRAIN only; off by default). See docstring.
-    if extra_train_csv is not None:
-        extra = build_or_load_table(extra_train_csv, use_cache=use_cache, rebuild=rebuild)
-        extra = extra[extra["city_key"] != holdout_city].copy()
-        # Drop station-hours already in official train/val: avoids double-counting
-        # the overlap AND stops any official val timestamp leaking into train.
-        keys = ["city_key", "station_key", "ts"]
-        seen = pd.concat([train[keys], val[keys]], ignore_index=True).assign(_seen=1)
-        extra = extra.merge(seen, on=keys, how="left")
-        extra = extra[extra["_seen"].isna()].drop(columns="_seen")
-        # Also drop supplementary rows inside any official val time window (per
-        # city): training on the same period we validate on would leak even at
-        # station-hours official never observed. Genuinely-new later months stay.
-        for ck, g in val.groupby("city_key", dropna=False):
-            lo, hi = g["ts"].min(), g["ts"].max()
-            extra = extra[~((extra["city_key"] == ck) & extra["ts"].between(lo, hi))]
-
-        for frame in (train, val, test_unseen):
-            frame["is_supplementary"] = False
-        extra["is_supplementary"] = True
-        train = pd.concat([train, extra], ignore_index=True)
-
-        if holdout_city in (set(train["city_key"]) | set(val["city_key"])):
-            raise AssertionError(f"holdout_city {holdout_city!r} leaked via extra source.")
 
     return Splits(
         train=train, val=val, test_unseen=test_unseen,
@@ -386,7 +402,11 @@ def _print_summary(sp: Splits) -> None:
     counts = sp.per_city_counts()
     with pd.option_context("display.width", 120):
         print(counts.to_string(index=False))
-    print("\nPer-city temporal cutoffs (<= cut -> train ; > cut -> val):")
+    sup = int(sp.train.get("is_supplementary", pd.Series(dtype=bool)).sum())
+    val_sup = int(sp.val.get("is_supplementary", pd.Series(dtype=bool)).sum())
+    print(f"\nSupplemental rows: train={sup:,}  val={val_sup:,}  "
+          f"(0 ⇒ no sources in {SUPPLEMENTAL_DIR.name}/ ; train_set.csv only)")
+    print("Per-city temporal cutoffs (<= cut -> train ; > cut -> val):")
     for ck, cut in sp.cutoffs.items():
         print(f"  {ck}: {cut}")
     w = city_balanced_weights(sp.train)

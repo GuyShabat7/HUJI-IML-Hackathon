@@ -86,20 +86,22 @@ These come straight from the EDA and directly shape the implementation:
         useful everywhere instead of being gated off. London station coords are recoverable
         (TfL station numbers ↔ `start_station_id`, see [README.md](README.md#supplementary-data--full-year-london)),
         which lets us recompute the `*_500m`/`*_1000m` counts and distances.
-  - [ ] **⚠️ Rules check first:** confirm with course staff that external feature enrichment is allowed
-        (README warns extra data *may* be disallowed). Keep enrichment reproducible (a script under
-        `tools/`) and **never overwrite `dataset/train_set.csv`**. If disallowed, fall back to the
-        orchestrator-gating behavior above.
-  - [x] **Opt-in scaffold built (off by default), pending the rules check above** —
-        [`tools/build_supplementary_london.py`](tools/build_supplementary_london.py) enriches the
-        full-year London release ([README §Supplementary Data](README.md#supplementary-data--full-year-london))
-        back to the `train_set.csv` schema (calendar rebuilt locally incl. US-federal `holiday_name`;
-        station meta + Jan–Feb weather back-filled from `train_set.csv`; `--weather openmeteo` fetches the
-        full range — the one transferable win, a warm-season temp→demand curve for M_weather). Feed it via
-        `load_splits(extra_train_csv=…)`, which augments **TRAIN only** (val/test stay official; overlap +
-        official val-window rows are dropped to prevent leakage; **city 3 stays held out**). Nothing imports
-        it and no default changed. NB: this covers the *full-year ride/weather* data, **not** the OSM POI
-        backfill in the bullet above — that remains open for the M_station enricher.
+  - [x] **✅ Rules: APPROVED.** Course confirmed external data may be used for **training and validation**.
+        Enrichment stays reproducible (scripts under `tools/`) and **never overwrites `dataset/train_set.csv`**.
+        The single hard rule: **`city 3` stays hidden during training.**
+  - [x] **Supplemental ENABLED BY DEFAULT (training + validation)** —
+        [`tools/build_supplementary_london.py`](tools/build_supplementary_london.py) enriches any raw release
+        (London via the [full-year release](README.md#supplementary-data--full-year-london); other cities via
+        `--city`) back to the `train_set.csv` schema (calendar rebuilt locally incl. US-federal `holiday_name`;
+        station meta + train-range weather back-filled from `train_set.csv`; `--weather openmeteo` fetches the
+        full range — the transferable win, a warm-season temp→demand curve for M_weather) and writes to
+        `dataset/supplemental/`. The harness ([`data.py`](submissions/challenge_1_ensamble/data.py)
+        `load_splits`, default `supplemental="auto"`) **auto-discovers** every CSV there, pools it with the
+        official data (exact station-hour overlaps de-duped, official kept), then runs the per-city temporal
+        split — so supplemental rows appear in **both train and val** (`is_supplementary` flag on every row).
+        **`city 3` is pulled out whole before the split** → only ever in the unseen-city test, never train/val
+        (guarded). Pass `supplemental=None` for the official-only baseline (§9). NB: covers the *ride/weather*
+        data, **not** the OSM POI backfill in the bullet above — that remains open for the M_station enricher.
 - [ ] **Treat `distance_to_nearest_rail_station == -1` as missing (NaN)** — it's a sentinel, not a value.
 - [ ] **`city 3` (L.A.) has `start_lat`/`start_lng` 100% missing** (already excluded) and constant
   `precipitation/rain/snowfall/holiday`.
@@ -145,10 +147,13 @@ The target does not exist in the raw data; **build it by aggregation**, reconstr
 
 ## 6. Validation protocol
 
-- [ ] **Train on `city 1` + `city 2` only.** Hold out **all of `city 3`** as the "never-before-seen
-  city" generalization test.
-- [ ] **In-distribution temporal holdout:** within c1 & c2, latest ~20% by time → validation
-  (early stopping, model selection, and to produce the base predictions that train the orchestrator).
+- [ ] **`city 3` is held out from training**, used only as the "never-before-seen city" generalization
+  test. Training uses the in-distribution cities (`city 1` + `city 2`) plus any approved **supplemental**
+  data for them (on by default, §4/§5); external `city 3` data, if any, enriches the test set only.
+- [ ] **In-distribution temporal holdout:** within the in-distribution cities, latest ~20% by time →
+  validation (early stopping, model selection, and to produce the base predictions that train the
+  orchestrator). Supplemental rows take part in this split (train **and** val); the per-city cut is over
+  the pooled official+supplemental data. Use `supplemental=None` for the official-only comparison.
 - [ ] **City-balanced `sample_weight`** (inverse to per-city volume) so London doesn't dominate.
 - [ ] **Report per-city MAE & RMSE** (mirror [evaluate.py](evaluate.py)) separately for: c1/c2 temporal
   holdout *and* c3 (headline generalization number).
@@ -184,18 +189,21 @@ fixed `predict.py` from `challenge_1_IDs` unchanged.
 ### Dev 1 — Data & validation harness  ([data pipeline §5], [validation §6])
 > ✅ **DONE — claude (2026-06-25).** Implemented in [`submissions/challenge_1_ensamble/data.py`](submissions/challenge_1_ensamble/data.py)
 > (self-contained: numpy/pandas/joblib only). Smoke-tested: builds in ~5s, reloads from cache in ~0.4s;
-> split invariants verified (no temporal leak, no train/val overlap, exact row coverage). §4 caveats
-> confirmed to carry through (London POI all-zero & rail==-1 at 100%, LA lat/lng 100% missing).
-> Reads **only** `train_set.csv` (no supplementary London data) and a hard guard keeps **city 3 a genuine
-> unknown** — held out whole, never in train/val even if an enriched source is later passed in.
+> split invariants verified (no temporal leak, no train/val overlap, official rows repartitioned-not-lost).
+> §4 caveats confirmed to carry through (London POI all-zero & rail==-1 at 100%, LA lat/lng 100% missing).
+> **External data approved & enabled by default:** `load_splits` auto-discovers `dataset/supplemental/*.csv`
+> and pools them into the **train + val** split; **`city 3` is held out whole during training** (only ever in
+> the unseen-city test) and a guard enforces it. `supplemental=None` gives the official-only baseline.
 - [x] Labeled station-hour builder with zero reconstruction (reuse `build_training_table` pattern). → `build_station_hour_table()`
 - [x] Per-city time split (reuse `make_local_split.py`); city-3-held-out + c1/c2 temporal holdout. → `load_splits()` returns `Splits(train, val, test_unseen)`
 - [x] Caching + a `load_splits()` helper the others can import. → `build_or_load_table()` (signature-checked `_cache/`, gitignored) + `city_balanced_weights()` helper
 
 > **For Dev 2/3:** `from data import load_splits, city_balanced_weights, WEATHER_COLS, CALENDAR_COLS, STATION_META_COLS`.
 > The table carries `city_key`/`city` (train-time only — split/weight/report, never a feature), `ts`,
-> `demand`, and all raw weather/calendar/station-meta columns; `holiday`/`rail==-1`/all-POI-zero are kept
-> **as-is** so the missingness-mask logic (§4) lives in `model.py`, not here.
+> `demand`, an `is_supplementary` flag, and all raw weather/calendar/station-meta columns;
+> `holiday`/`rail==-1`/all-POI-zero are kept **as-is** so the missingness-mask logic (§4) lives in
+> `model.py`, not here. `load_splits()` is supplemental-on by default (auto-discovers `dataset/supplemental/`);
+> pass `supplemental=None` to reproduce the official-only numbers, or `supplemental=[paths]` to pin sources.
 
 ### Dev 2 — Shared features + M_weather + M_calendar  ([§3], [§4])
 - [ ] `CATEGORY_FEATURES`, `build_category_matrix(df, cat)`, `category_missingness(df, cat)` in `model.py`

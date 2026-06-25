@@ -140,9 +140,24 @@ cd submissions/challenge_1_IDs && python train.py
 The `enrichment/` folder holds the reusable lookups and scripts used to build all this:
 per-city `*_station_features.csv` (POI) and `*_weather_2025.csv`, plus `enrich.py`
 (joins features + weather + calendar onto any ride file) and the fetch/POI builders.
+[`tools/build_supplementary_london.py`](tools/build_supplementary_london.py) is a lighter,
+self-contained alternative that enriches a single raw release (any city via `--city`)
+straight to the `train_set.csv` schema.
 
-> ⚠️ **Hackathon rules:** training on data beyond the provided `train_set.csv` may be
-> disallowed — confirm with course staff before using this in a submission.
+**Two ways to consume the enriched data**
+
+- **Baseline (drop-in):** replace `dataset/train_set.csv` as shown above; `train.py`
+  aggregates it unchanged.
+- **Ensemble harness (recommended):** drop the enriched per-city CSVs into
+  `dataset/supplemental/` — `load_splits` in
+  [`submissions/challenge_1_ensamble/data.py`](submissions/challenge_1_ensamble/data.py)
+  **auto-discovers** them (on by default), pools them with the official data, and splits
+  into **train + val**, while keeping `dataset/train_set.csv` intact for the honest
+  official-only comparison (`supplemental=None`).
+
+> ✅ **Rules:** external data is **approved for training and validation** in this project.
+> The one hard rule: **`city 3` stays hidden during training** — the harness routes every
+> `city 3` row (official or supplemental) to the unseen-city test, never to train.
 
 ---
 

@@ -2,6 +2,9 @@
 dataset/*.csv
 dataset/*.zip
 dataset/*.gz
+# enriched supplemental sources + raw downloads (rebuildable via tools/)
+dataset/supplemental/
+dataset/_raw/
 !dataset/.gitkeep
 
 # Trained artifacts
