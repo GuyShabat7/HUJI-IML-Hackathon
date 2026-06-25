@@ -69,9 +69,20 @@ def _orch_matrix(df, base_models, base_cols):
     return Z
 
 
-def train_artifacts(train_df: pd.DataFrame, n_jobs: int = -1, seed: int = 42) -> dict:
-    """Fit the 3 base models + the orchestrator. Returns the artifacts dict for predict."""
+def train_artifacts(train_df: pd.DataFrame, n_jobs: int = -1, seed: int = 42,
+                    n_estimators: int | None = None, n_mask_augment: int = 0) -> dict:
+    """Fit the 3 base models + the orchestrator. Returns the artifacts dict for predict.
+
+    n_estimators   : override the base models' tree count (e.g. small for a --fast run).
+    n_mask_augment : rounds of missingness augmentation for the orchestrator — copies of
+                     the OOF training rows with one category neutralised + its miss-flag set,
+                     so the gate learns to cope when a whole category is absent (0 = off).
+    """
     from sklearn.model_selection import KFold
+
+    base_params = dict(BASE_PARAMS)
+    if n_estimators:
+        base_params["n_estimators"] = int(n_estimators)
 
     df = _ensure_ts(train_df).reset_index(drop=True)
     y = df["demand"].astype(float).to_numpy()
@@ -84,21 +95,36 @@ def train_artifacts(train_df: pd.DataFrame, n_jobs: int = -1, seed: int = 42) ->
         for c in CATS:
             Xtr = _BUILDERS[c](df.iloc[tr]).reindex(columns=base_cols[c])
             Xva = _BUILDERS[c](df.iloc[va]).reindex(columns=base_cols[c])
-            m = xgb.XGBRegressor(n_jobs=n_jobs, **BASE_PARAMS)
+            m = xgb.XGBRegressor(n_jobs=n_jobs, **base_params)
             m.fit(Xtr, y[tr])
             oof[f"pred_{c}"][va] = m.predict(Xva)
     miss = F.category_missingness(df).reset_index(drop=True)
     Zoof = pd.DataFrame(oof)
     for col in ("miss_weather", "miss_calendar", "miss_station"):
         Zoof[col] = miss[col].to_numpy()
+
+    # optional missingness augmentation: teach the gate to handle an absent category
+    Zfit, yfit = Zoof, y
+    if n_mask_augment > 0:
+        miss_of = {"weather": "miss_weather", "calendar": "miss_calendar", "station": "miss_station"}
+        parts_Z, parts_y = [Zoof], [y]
+        for _ in range(int(n_mask_augment)):
+            for c in CATS:
+                Zc = Zoof.copy()
+                Zc[f"pred_{c}"] = float(np.mean(oof[f"pred_{c}"]))  # neutralise this category
+                Zc[miss_of[c]] = 1
+                parts_Z.append(Zc); parts_y.append(y)
+        Zfit = pd.concat(parts_Z, ignore_index=True)
+        yfit = np.concatenate(parts_y)
+
     orch = xgb.XGBRegressor(n_jobs=n_jobs, **ORCH_PARAMS)
-    orch.fit(Zoof, y)
+    orch.fit(Zfit, yfit)
 
     # 2) Refit the base models on ALL of train for deployment.
     base_models = {}
     for c in CATS:
         X = _BUILDERS[c](df).reindex(columns=base_cols[c])
-        m = xgb.XGBRegressor(n_jobs=n_jobs, **BASE_PARAMS)
+        m = xgb.XGBRegressor(n_jobs=n_jobs, **base_params)
         m.fit(X, y)
         base_models[c] = m
 
