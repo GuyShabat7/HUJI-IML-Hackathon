@@ -34,14 +34,15 @@ city used only for grading).
 ## Table of Contents
 
 1. [Data Provenance](#data-provenance)
-2. [Dataset at a Glance](#dataset-at-a-glance)
-3. [Column Schema](#column-schema)
-4. [Inference Contract](#inference-contract)
-5. [Working with the Data](#working-with-the-data)
-6. [Project Structure](#project-structure)
-7. [Reproducing the Model](#reproducing-the-model)
-8. [Evaluation](#evaluation)
-9. [Notes & Caveats](#notes--caveats)
+2. [Supplementary Data — Full-Year London](#supplementary-data--full-year-london)
+3. [Dataset at a Glance](#dataset-at-a-glance)
+4. [Column Schema](#column-schema)
+5. [Inference Contract](#inference-contract)
+6. [Working with the Data](#working-with-the-data)
+7. [Project Structure](#project-structure)
+8. [Reproducing the Model](#reproducing-the-model)
+9. [Evaluation](#evaluation)
+10. [Notes & Caveats](#notes--caveats)
 
 ---
 
@@ -71,6 +72,50 @@ features. **All trips are from early 2025.**
 > The held-out grading city ("city 4") is almost certainly another comparable public
 > system processed through the same pipeline — likely an early-2025 slice, so training
 > seasonality should roughly match the grading distribution.
+
+---
+
+## Supplementary Data — Full-Year London
+
+The provided `train_set.csv` only covers **Jan–Feb 2025** for London (`city 1`). For
+experiments that need warm-season / full-year coverage, we pulled the **entire 2025
+calendar year** for London directly from the original TfL portal and host it as a
+GitHub **Release** (the files are too large for the git repo itself):
+
+**➡ [Release: `london-2025-data`](https://github.com/GuyShabat7/HUJI-IML-Hackathon/releases/tag/london-2025-data)**
+
+| Asset | Coverage | Rides | Size (gz) |
+|-------|----------|-------|-----------|
+| `london_2025_full_year_start.csv.gz` | Jan–Dec 2025 | 9,068,241 | 100 MB |
+| `london_2025_summer_start.csv.gz` | Jun–Aug 2025 | 2,562,071 | 28 MB |
+
+**Verified same source.** Reconstructing the Jan–Feb slice from these files reproduces
+`train_set.csv`'s `city 1` **exactly**: 807/807 stations identical, 1,142,318 vs
+1,142,317 rides (a 1-row boundary difference). London `start_station_id` values in
+`train_set.csv` are simply the TfL station numbers in numeric form (e.g. TfL `001037`
+→ `1037.0`).
+
+**Format — start-side fields only** (the fields that survive to inference; the
+"removed" leakage fields — end station, duration, bike, user type — are dropped):
+
+```
+rental_id,started_at,start_station_id,start_station_name
+146970868,2025-03-14 23:59,001035,"Boston Place, Marylebone"
+```
+
+> **Not enriched.** This is the raw upstream ride data — it has **no** weather, POI,
+> lat/lng, or calendar columns (those were added by the course pipeline). It is enough
+> to **reconstruct the station-hour demand target**; to use it as model input you must
+> re-join weather/POI yourself.
+
+**Reproduce / extend** (other months, full columns, or D.C./L.A.):
+
+```bash
+python tools/fetch_london_tfl.py     # downloads, trims to start-side, writes dataset/*.csv
+```
+
+> ⚠️ **Hackathon rules:** training on data beyond the provided `train_set.csv` may be
+> disallowed — confirm with course staff before using this in a submission.
 
 ---
 
@@ -165,6 +210,8 @@ HUJI-IML-Hackathon/
 │       ├── predict.py                # evaluator wrapper — DO NOT modify
 │       ├── weights.joblib            # all fitted artifacts
 │       └── README                    # team names / IDs / model description
+├── tools/
+│   └── fetch_london_tfl.py           # fetch full-year London data (see Supplementary Data)
 ├── evaluate.py                       # local evaluator
 ├── base_model.py                     # base interface the model inherits
 ├── build_station_hour_eval_data.py   # ride-level → station-hour eval format

@@ -1,6 +1,7 @@
 # Data — never commit the dataset (large; provided separately)
 dataset/*.csv
 dataset/*.zip
+dataset/*.gz
 !dataset/.gitkeep
 
 # Trained artifacts
