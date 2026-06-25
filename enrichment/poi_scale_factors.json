@@ -1,0 +1,10 @@
+{
+  "bike_lane_length_500m": 2.235200274399872,
+  "park_area_500m": 1.1043904895874825,
+  "university_count_1000m": 1.0,
+  "office_poi_count_1000m": 0.6071428571428571,
+  "retail_poi_count_1000m": 1.0503597122302157,
+  "restaurant_cafe_count_500m": 1.2352941176470589,
+  "transit_stop_count_500m": 1.1578947368421053,
+  "distance_to_nearest_rail_station": 1.0
+}

@@ -8,6 +8,12 @@ dataset/*.gz
 *.joblib
 mae_by_city.csv
 
+# Large OSM extracts / temp download dirs (enrichment); keep the small lookup CSVs
+*.osm.pbf
+enrichment/_tmp/
+enrichment/*.log
+enrichment/dataset/
+
 # Python
 __pycache__/
 *.py[cod]

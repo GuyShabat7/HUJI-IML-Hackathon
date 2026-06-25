@@ -34,7 +34,7 @@ city used only for grading).
 ## Table of Contents
 
 1. [Data Provenance](#data-provenance)
-2. [Supplementary Data — Full-Year London](#supplementary-data--full-year-london)
+2. [Added Data & Enrichment](#added-data--enrichment)
 3. [Dataset at a Glance](#dataset-at-a-glance)
 4. [Column Schema](#column-schema)
 5. [Inference Contract](#inference-contract)
@@ -75,44 +75,71 @@ features. **All trips are from early 2025.**
 
 ---
 
-## Supplementary Data — Full-Year London
+## Added Data & Enrichment
 
-The provided `train_set.csv` only covers **Jan–Feb 2025** for London (`city 1`). For
-experiments that need warm-season / full-year coverage, we pulled the **entire 2025
-calendar year** for London directly from the original TfL portal and host it as a
-GitHub **Release** (the files are too large for the git repo itself):
+### Why we added data
 
-**➡ [Release: `london-2025-data`](https://github.com/GuyShabat7/HUJI-IML-Hackathon/releases/tag/london-2025-data)**
+The provided `train_set.csv` is **Jan–Feb 2025 only — i.e. winter**, and L.A. is just a
+5-day slice. A model trained on it overfits to cold-weather demand patterns and has very
+little signal for `city 3`, which hurts generalization to the unseen grading city
+(`city 4`). To fix this we rebuilt the dataset to be **(1) much larger, (2) all-season
+(full calendar year), and (3) fully featured** for all three cities.
 
-| Asset | Coverage | Rides | Size (gz) |
-|-------|----------|-------|-----------|
-| `london_2025_full_year_start.csv.gz` | Jan–Dec 2025 | 9,068,241 | 100 MB |
-| `london_2025_summer_start.csv.gz` | Jun–Aug 2025 | 2,562,071 | 28 MB |
+### What we added (3 GitHub Releases)
 
-**Verified same source.** Reconstructing the Jan–Feb slice from these files reproduces
-`train_set.csv`'s `city 1` **exactly**: 807/807 stations identical, 1,142,318 vs
-1,142,317 rides (a 1-row boundary difference). London `start_station_id` values in
-`train_set.csv` are simply the TfL station numbers in numeric form (e.g. TfL `001037`
-→ `1037.0`).
+Files are hosted as Releases because they exceed GitHub's 100 MB in-repo limit.
 
-**Format — start-side fields only** (the fields that survive to inference; the
-"removed" leakage fields — end station, duration, bike, user type — are dropped):
+**① Model-ready, enriched, full-year — [`enriched-2025-data`](https://github.com/GuyShabat7/HUJI-IML-Hackathon/releases/tag/enriched-2025-data)** ← use this to train
 
-```
-rental_id,started_at,start_station_id,start_station_name
-146970868,2025-03-14 23:59,001035,"Boston Place, Marylebone"
-```
+| Asset | City | Rides | Size (gz) |
+|---|---|---|---|
+| `london_2025_enriched.csv.gz` | London (`city 1`) | 9,068,241 | 319 MB |
+| `dc_2025_enriched.csv.gz` | D.C. (`city 2`) | 6,662,647 | 219 MB |
+| `la_2025_enriched.csv.gz` | L.A. (`city 3`) | 434,515 | 9 MB |
 
-> **Not enriched.** This is the raw upstream ride data — it has **no** weather, POI,
-> lat/lng, or calendar columns (those were added by the course pipeline). It is enough
-> to **reconstruct the station-hour demand target**; to use it as model input you must
-> re-join weather/POI yourself.
+Same column schema as `train_set.csv` (minus the leakage fields), so it is a **drop-in
+for `train.py`**. Columns: `started_at, hour_ts, city, start_station_id,
+start_station_name, start_lat, start_lng`, the 8 weather columns, the 9 POI/infra
+columns, and `date, weekday, weekend, holiday, holiday_name, working_day`.
 
-**Reproduce / extend** (other months, full columns, or D.C./L.A.):
+**② Raw start-side ride data** (no features; for re-aggregation / re-enrichment):
+[`london-2025-data`](https://github.com/GuyShabat7/HUJI-IML-Hackathon/releases/tag/london-2025-data)
+and [`dc-la-2025-data`](https://github.com/GuyShabat7/HUJI-IML-Hackathon/releases/tag/dc-la-2025-data)
+— `rental_id, started_at, start_station_id, start_station_name`, plus Jun–Aug "summer" subsets.
+
+### How the features were produced
+
+| Feature group | Source & method | Validation |
+|---|---|---|
+| **Weather** (8 cols) | Open-Meteo Archive API, hourly per city, full year | Matches course Jan–Feb: London r=0.986, **D.C. r=0.999**, L.A. r=0.969 |
+| **POI / infra** (9 cols) | **D.C./L.A.: the course's own per-station values** (reused exactly). **London: computed from OpenStreetMap** and calibrated to the course's D.C. scale — because the course left London POI **blank** (all sentinels). | London POI is approximate (rank-corr ≈ 0.5–0.8 vs course method); D.C./L.A. are exact |
+| **Calendar** (6 cols) | Computed from the timestamp; **US federal holidays** (matching the course's quirk), `weekday` Mon=0, `working_day` = not weekend & not holiday | Reproduces course encoding exactly |
+| **lat/lng** | Course values where present; London gaps filled from TfL BikePoint; L.A. from the trip-file coordinates | — |
+
+### Provenance & verification of the rides
+
+- **London** rides are **verified identical** to the exercise source: the reconstructed
+  Jan–Feb slice matches `train_set.csv`'s `city 1` to 807/807 stations and ±1 ride.
+- **D.C./L.A.** are the **full unfiltered source** (Capital Bikeshare / Metro Bike Share
+  open data) — *more* complete than the course's filtered slice (e.g. D.C. Jan–Feb is
+  ~655k rides here vs 461k in `train_set.csv`), so they are not byte-identical.
+
+### How to train on it
 
 ```bash
-python tools/fetch_london_tfl.py     # downloads, trims to start-side, writes dataset/*.csv
+# 1. download an enriched city file from the enriched-2025-data release, e.g.:
+gh release download enriched-2025-data --repo GuyShabat7/HUJI-IML-Hackathon \
+    --pattern "london_2025_enriched.csv.gz"
+gunzip london_2025_enriched.csv.gz && mv london_2025_enriched.csv dataset/train_set.csv
+# (or concatenate the three cities, and/or append the original train_set.csv)
+
+# 2. train unchanged — train.py reads dataset/train_set.csv ride-level and aggregates
+cd submissions/challenge_1_IDs && python train.py
 ```
+
+The `enrichment/` folder holds the reusable lookups and scripts used to build all this:
+per-city `*_station_features.csv` (POI) and `*_weather_2025.csv`, plus `enrich.py`
+(joins features + weather + calendar onto any ride file) and the fetch/POI builders.
 
 > ⚠️ **Hackathon rules:** training on data beyond the provided `train_set.csv` may be
 > disallowed — confirm with course staff before using this in a submission.
@@ -211,7 +238,12 @@ HUJI-IML-Hackathon/
 │       ├── weights.joblib            # all fitted artifacts
 │       └── README                    # team names / IDs / model description
 ├── tools/
-│   └── fetch_london_tfl.py           # fetch full-year London data (see Supplementary Data)
+│   └── fetch_london_tfl.py           # fetch full-year London data (see Added Data & Enrichment)
+├── enrichment/                       # feature lookups + scripts (see Added Data & Enrichment)
+│   ├── {london,dc,la}_station_features.csv   # per-station lat/lng + POI
+│   ├── {london,dc,la}_weather_2025.csv       # per-hour weather
+│   ├── enrich.py                     # join features+weather+calendar onto a ride file
+│   └── osm_poi*.py, build_*.py       # builders for the above
 ├── evaluate.py                       # local evaluator
 ├── base_model.py                     # base interface the model inherits
 ├── build_station_hour_eval_data.py   # ride-level → station-hour eval format
