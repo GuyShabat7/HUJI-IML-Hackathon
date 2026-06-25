@@ -29,3 +29,6 @@ env/
 .DS_Store
 .idea/
 .vscode/
+
+# Cluster job logs
+cluster/logs/
