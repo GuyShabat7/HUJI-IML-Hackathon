@@ -32,3 +32,6 @@ env/
 
 # Cluster job logs
 cluster/logs/
+
+# Local API/raw caches (rebuildable)
+dataset/_cache/
