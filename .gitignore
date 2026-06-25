@@ -32,3 +32,9 @@ env/
 .DS_Store
 .idea/
 .vscode/
+
+# Cluster job logs
+cluster/logs/
+
+# Local API/raw caches (rebuildable)
+dataset/_cache/

@@ -1,0 +1,141 @@
+"""model.py — missingness-aware XGBoost ensemble for bike-demand (MODELPLAN §2-3).
+
+Architecture (no identity / location features — chosen for generalization to the unseen
+grading city, validated by tools/bakeoff.py):
+
+    M_weather   (weather only)      ┐
+    M_calendar  (time/calendar)     ├─ base XGBoost regressors (count:poisson)
+    M_station   (built-environment) ┘
+                       │  per-category missingness masks (miss_W, miss_C, miss_S)
+                       ▼
+              ORCHESTRATOR (XGBoost learned gate over [predW,predC,predS,missW,missC,missS])
+                       ▼
+                  max(0, ŷ)
+
+The orchestrator is trained on OUT-OF-FOLD base predictions (no leakage). All feature
+construction lives in features.py and is shared by train.py and predict — so train and
+inference always see identical features. Contains NO identity/location lookups.
+
+`train_artifacts(train_df, n_jobs=...)` is the entry point used by both train.py and
+tools/eval_local.py.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+
+import features as F
+
+CATS = ("weather", "calendar", "station")
+_BUILDERS = {"weather": F.build_weather, "calendar": F.build_calendar, "station": F.build_station}
+
+BASE_PARAMS = dict(objective="count:poisson", n_estimators=600, learning_rate=0.05,
+                   max_depth=7, subsample=0.8, colsample_bytree=0.8, min_child_weight=5,
+                   tree_method="hist", random_state=42)
+ORCH_PARAMS = dict(objective="reg:squarederror", n_estimators=400, learning_rate=0.05,
+                   max_depth=4, subsample=0.8, colsample_bytree=0.9,
+                   tree_method="hist", random_state=42)
+
+
+def _ensure_ts(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a floored hourly ``ts`` from whatever timestamp the row carries (no mutation of caller)."""
+    out = df.copy()
+    if "ts" in out.columns:
+        ts = pd.to_datetime(out["ts"], errors="coerce")
+    elif "hour_ts" in out.columns:
+        ts = pd.to_datetime(out["hour_ts"], errors="coerce")
+    elif "target_hour_start" in out.columns:
+        ts = pd.to_datetime(out["target_hour_start"], errors="coerce")
+    elif "started_at" in out.columns:
+        ts = pd.to_datetime(out["started_at"], errors="coerce")
+    else:
+        ts = pd.to_datetime(out["date"], errors="coerce") + pd.to_timedelta(
+            pd.to_numeric(out.get("hour", 0), errors="coerce").fillna(0), unit="h")
+    out["ts"] = ts.dt.floor("h")
+    return out
+
+
+def _orch_matrix(df, base_models, base_cols):
+    """Stack base predictions + missingness masks into the orchestrator's input matrix."""
+    preds = {}
+    for c in CATS:
+        X = _BUILDERS[c](df).reindex(columns=base_cols[c])
+        preds[f"pred_{c}"] = base_models[c].predict(X)
+    miss = F.category_missingness(df).reset_index(drop=True)
+    Z = pd.DataFrame(preds)
+    for col in ("miss_weather", "miss_calendar", "miss_station"):
+        Z[col] = miss[col].to_numpy()
+    return Z
+
+
+def train_artifacts(train_df: pd.DataFrame, n_jobs: int = -1, seed: int = 42) -> dict:
+    """Fit the 3 base models + the orchestrator. Returns the artifacts dict for predict."""
+    from sklearn.model_selection import KFold
+
+    df = _ensure_ts(train_df).reset_index(drop=True)
+    y = df["demand"].astype(float).to_numpy()
+    base_cols = {c: list(_BUILDERS[c](df).columns) for c in CATS}
+
+    # 1) Out-of-fold base predictions -> leakage-free orchestrator training data.
+    oof = {f"pred_{c}": np.zeros(len(df)) for c in CATS}
+    kf = KFold(n_splits=3, shuffle=True, random_state=seed)
+    for tr, va in kf.split(df):
+        for c in CATS:
+            Xtr = _BUILDERS[c](df.iloc[tr]).reindex(columns=base_cols[c])
+            Xva = _BUILDERS[c](df.iloc[va]).reindex(columns=base_cols[c])
+            m = xgb.XGBRegressor(n_jobs=n_jobs, **BASE_PARAMS)
+            m.fit(Xtr, y[tr])
+            oof[f"pred_{c}"][va] = m.predict(Xva)
+    miss = F.category_missingness(df).reset_index(drop=True)
+    Zoof = pd.DataFrame(oof)
+    for col in ("miss_weather", "miss_calendar", "miss_station"):
+        Zoof[col] = miss[col].to_numpy()
+    orch = xgb.XGBRegressor(n_jobs=n_jobs, **ORCH_PARAMS)
+    orch.fit(Zoof, y)
+
+    # 2) Refit the base models on ALL of train for deployment.
+    base_models = {}
+    for c in CATS:
+        X = _BUILDERS[c](df).reindex(columns=base_cols[c])
+        m = xgb.XGBRegressor(n_jobs=n_jobs, **BASE_PARAMS)
+        m.fit(X, y)
+        base_models[c] = m
+
+    # global fallback (non-spatial): median demand by hour-of-day x weekday over c1+c2.
+    fb = df.assign(_h=df["ts"].dt.hour, _w=df["ts"].dt.weekday)
+    fallback = fb.groupby(["_w", "_h"])["demand"].median().to_dict()
+    return {
+        "base_models": base_models, "base_cols": base_cols,
+        "orchestrator": orch, "orch_cols": list(Zoof.columns),
+        "fallback_how_median": fallback, "global_median": float(np.median(y)),
+    }
+
+
+class BikeDemandModel:
+    """Missingness-aware XGBoost ensemble. No identity/location lookups."""
+
+    def __init__(self):
+        self.a = None
+
+    def load_artifacts(self, artifacts: dict) -> None:
+        self.a = artifacts
+
+    def predict(self, test_df: pd.DataFrame) -> np.ndarray:
+        if self.a is None:
+            raise RuntimeError("call load_artifacts() first")
+        df = _ensure_ts(test_df)                       # copy; never mutates test_df
+        Z = _orch_matrix(df, self.a["base_models"], self.a["base_cols"])
+        Z = Z.reindex(columns=self.a["orch_cols"])
+        preds = self.a["orchestrator"].predict(Z).astype(float)
+
+        # cold-start safety net: if every category is missing, use the non-spatial
+        # hour-of-day x weekday median fallback (still no location identity).
+        cold = (Z[["miss_weather", "miss_calendar", "miss_station"]].sum(axis=1) == 3).to_numpy()
+        if cold.any():
+            w = df["ts"].dt.weekday.to_numpy(); h = df["ts"].dt.hour.to_numpy()
+            fb = np.array([self.a["fallback_how_median"].get((int(wi), int(hi)),
+                                                             self.a["global_median"])
+                           for wi, hi in zip(w, h)])
+            preds = np.where(cold, fb, preds)
+        return np.maximum(0.0, preds)
