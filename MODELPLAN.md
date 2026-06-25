@@ -90,6 +90,16 @@ These come straight from the EDA and directly shape the implementation:
         (README warns extra data *may* be disallowed). Keep enrichment reproducible (a script under
         `tools/`) and **never overwrite `dataset/train_set.csv`**. If disallowed, fall back to the
         orchestrator-gating behavior above.
+  - [x] **Opt-in scaffold built (off by default), pending the rules check above** —
+        [`tools/build_supplementary_london.py`](tools/build_supplementary_london.py) enriches the
+        full-year London release ([README §Supplementary Data](README.md#supplementary-data--full-year-london))
+        back to the `train_set.csv` schema (calendar rebuilt locally incl. US-federal `holiday_name`;
+        station meta + Jan–Feb weather back-filled from `train_set.csv`; `--weather openmeteo` fetches the
+        full range — the one transferable win, a warm-season temp→demand curve for M_weather). Feed it via
+        `load_splits(extra_train_csv=…)`, which augments **TRAIN only** (val/test stay official; overlap +
+        official val-window rows are dropped to prevent leakage; **city 3 stays held out**). Nothing imports
+        it and no default changed. NB: this covers the *full-year ride/weather* data, **not** the OSM POI
+        backfill in the bullet above — that remains open for the M_station enricher.
 - [ ] **Treat `distance_to_nearest_rail_station == -1` as missing (NaN)** — it's a sentinel, not a value.
 - [ ] **`city 3` (L.A.) has `start_lat`/`start_lng` 100% missing** (already excluded) and constant
   `precipitation/rain/snowfall/holiday`.
@@ -120,10 +130,13 @@ The target does not exist in the raw data; **build it by aggregation**, reconstr
 - [x] **Labeled validation set:** built **directly** — `build_station_hour_table` already attaches `demand`
   to every station-hour, so `load_splits().val` carries features + labels in-memory (equivalent to the
   `build_station_hour_eval_data.py` public/private + join-on-`id` route, without the CSV round-trip).
-  - [x] **Supplementary-data check (per request):** the harness reads **only** `dataset/train_set.csv`.
-        It does **not** pull the full-year London release ([README §Supplementary Data](README.md#supplementary-data--full-year-london))
-        — that data is London-only, opt-in, and rules-gated, with **no** equivalent for city 3. **City 3
-        stays a genuine unknown**: held out whole as `test_unseen` and protected by a hard leakage guard in
+  - [x] **Supplementary-data check (per request):** by **default** the harness reads **only**
+        `dataset/train_set.csv` and does **not** pull the full-year London release
+        ([README §Supplementary Data](README.md#supplementary-data--full-year-london)) — that data is
+        London-only, opt-in, and rules-gated, with **no** equivalent for city 3. An **opt-in** path now
+        exists ([`tools/build_supplementary_london.py`](tools/build_supplementary_london.py) →
+        `load_splits(extra_train_csv=…)`, see §4) for the moment rules clear. Either way **city 3 stays a
+        genuine unknown**: held out whole as `test_unseen` and protected by a hard leakage guard in
         `load_splits` so no enriched/extended source can ever carry city-3 rows into train/val.
 - [x] Cache intermediate frames under `submissions/challenge_1_ensamble/_cache/` (gitignored). →
   signature-checked `data.build_or_load_table()` (rebuilds only when `train_set.csv` changes).

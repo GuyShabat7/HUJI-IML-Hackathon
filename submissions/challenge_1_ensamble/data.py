@@ -207,6 +207,17 @@ def _source_signature(path: Path) -> dict:
     return {"path": str(path), "size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
 
+def _cache_paths_for(train_csv: Path) -> tuple[Path, Path]:
+    """Per-source cache filenames so different sources don't clobber each other.
+
+    The canonical train_set.csv keeps the original, stable cache names; any other
+    source (e.g. an enriched London CSV) gets its own pair derived from its stem.
+    """
+    if train_csv == TRAIN_CSV.resolve():
+        return TABLE_CACHE, TABLE_CACHE_META
+    return CACHE_DIR / f"table_{train_csv.stem}.pkl", CACHE_DIR / f"table_{train_csv.stem}.meta.json"
+
+
 def build_or_load_table(
     train_csv: str | Path = TRAIN_CSV,
     use_cache: bool = True,
@@ -214,22 +225,23 @@ def build_or_load_table(
 ) -> pd.DataFrame:
     """Build the station-hour table, reusing ``_cache/`` when the source is unchanged."""
     train_csv = Path(train_csv).resolve()
+    cache_path, meta_path = _cache_paths_for(train_csv)
 
-    if use_cache and not rebuild and TABLE_CACHE.exists() and TABLE_CACHE_META.exists():
+    if use_cache and not rebuild and cache_path.exists() and meta_path.exists():
         try:
-            cached_sig = json.loads(TABLE_CACHE_META.read_text())
+            cached_sig = json.loads(meta_path.read_text())
         except (OSError, ValueError):
             cached_sig = None
         if cached_sig == _source_signature(train_csv):
-            return pd.read_pickle(TABLE_CACHE)
+            return pd.read_pickle(cache_path)
 
     rides = pd.read_csv(train_csv, low_memory=False)
     table = build_station_hour_table(rides)
 
     if use_cache:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        table.to_pickle(TABLE_CACHE)
-        TABLE_CACHE_META.write_text(json.dumps(_source_signature(train_csv)))
+        table.to_pickle(cache_path)
+        meta_path.write_text(json.dumps(_source_signature(train_csv)))
 
     return table
 
@@ -269,6 +281,7 @@ def load_splits(
     holdout_city: str = HOLDOUT_CITY,
     use_cache: bool = True,
     rebuild: bool = False,
+    extra_train_csv: str | Path | None = None,
 ) -> Splits:
     """Build (or load) the table and return the train / val / unseen-city splits.
 
@@ -276,6 +289,20 @@ def load_splits(
     in-distribution city contributes the same latest-``val_fraction`` slice; a
     random split would leak the future. The holdout city is removed *before*
     the temporal split and returned whole as ``test_unseen``.
+
+    ``extra_train_csv`` (default ``None`` ⇒ no behavior change) is the OPT-IN hook
+    for supplementary data — e.g. the enriched full-year London produced by
+    ``tools/build_supplementary_london.py`` (rules-gated; see README §Supplementary
+    Data). It augments **TRAIN only**: ``val`` and ``test_unseen`` stay 100%
+    official data so the in-distribution holdout and the unseen-city probe remain
+    honest, and the holdout city is dropped from the extra source too. Station-hours
+    that already exist in the official train/val are removed from the extra source,
+    which both avoids double-counting and prevents any val timestamp leaking into
+    train. Splits gain an ``is_supplementary`` flag only when this is used.
+
+    Caveat: because supplementary months can extend past the official val window,
+    the in-distribution London val loses its strict temporal-holdout meaning when
+    this hook is on — rely on the city-3 unseen-city MAE as the headline (§6).
     """
     table = build_or_load_table(train_csv, use_cache=use_cache, rebuild=rebuild)
 
@@ -304,6 +331,31 @@ def load_splits(
     leaked = set(train["city_key"]) | set(val["city_key"])
     if holdout_city in leaked:
         raise AssertionError(f"holdout_city {holdout_city!r} leaked into train/val.")
+
+    # Opt-in supplementary augmentation (TRAIN only; off by default). See docstring.
+    if extra_train_csv is not None:
+        extra = build_or_load_table(extra_train_csv, use_cache=use_cache, rebuild=rebuild)
+        extra = extra[extra["city_key"] != holdout_city].copy()
+        # Drop station-hours already in official train/val: avoids double-counting
+        # the overlap AND stops any official val timestamp leaking into train.
+        keys = ["city_key", "station_key", "ts"]
+        seen = pd.concat([train[keys], val[keys]], ignore_index=True).assign(_seen=1)
+        extra = extra.merge(seen, on=keys, how="left")
+        extra = extra[extra["_seen"].isna()].drop(columns="_seen")
+        # Also drop supplementary rows inside any official val time window (per
+        # city): training on the same period we validate on would leak even at
+        # station-hours official never observed. Genuinely-new later months stay.
+        for ck, g in val.groupby("city_key", dropna=False):
+            lo, hi = g["ts"].min(), g["ts"].max()
+            extra = extra[~((extra["city_key"] == ck) & extra["ts"].between(lo, hi))]
+
+        for frame in (train, val, test_unseen):
+            frame["is_supplementary"] = False
+        extra["is_supplementary"] = True
+        train = pd.concat([train, extra], ignore_index=True)
+
+        if holdout_city in (set(train["city_key"]) | set(val["city_key"])):
+            raise AssertionError(f"holdout_city {holdout_city!r} leaked via extra source.")
 
     return Splits(
         train=train, val=val, test_unseen=test_unseen,
