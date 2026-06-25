@@ -64,7 +64,8 @@ def _fit_predict(Xtr, ytr, w, Xva, Xte, n_jobs, n_estimators, objectives):
     """
     Xva = Xva.reindex(columns=Xtr.columns)
     Xte = Xte.reindex(columns=Xtr.columns)
-    objs = {"poisson": ["poisson"], "poisson_l1": ["poisson", "regression_l1"]}[objectives]
+    objs = {"poisson": ["poisson"], "l1": ["regression_l1"],
+            "poisson_l1": ["poisson", "regression_l1"]}[objectives]
     models = [_train_lgbm(Xtr, ytr, o, n_jobs, w, n_estimators) for o in objs]
     pv = np.mean([m.predict(Xva) for m in models], axis=0)
     pt = np.mean([m.predict(Xte) for m in models], axis=0)
@@ -77,7 +78,8 @@ def _scores_for(name, splits, val_pred, test_pred):
     return {"name": name, "holdout_city": splits.holdout_city, "scores": s}
 
 
-def run(n_jobs, val_fraction, rebuild, n_estimators, sample, objectives, recompute_baseline):
+def run(n_jobs, val_fraction, rebuild, n_estimators, sample, objectives, recompute_baseline,
+        no_weight=False):
     data = eval_local.load_data_harness()
     splits = data.load_splits(val_fraction=val_fraction, rebuild=rebuild)
 
@@ -85,9 +87,12 @@ def run(n_jobs, val_fraction, rebuild, n_estimators, sample, objectives, recompu
     train_fit = splits.train
     if sample < 1.0:
         train_fit = splits.train.sample(frac=sample, random_state=42).reset_index(drop=True)
+    # city-balanced weights help only if cities are row-imbalanced; c1/c2 are ~balanced, so
+    # --no-weight keeps regression_l1 fast (weighted median is the slow path) at ~no cost.
+    w = None if no_weight else data.city_balanced_weights(train_fit)
     print(f"[bakeoff] recipe: objectives={objectives}  n_estimators={n_estimators}  "
-          f"train_sample={sample}  train_rows={len(train_fit):,}/{len(splits.train):,}", flush=True)
-    w = data.city_balanced_weights(train_fit)
+          f"train_sample={sample}  weight={'none' if no_weight else 'city-balanced'}  "
+          f"train_rows={len(train_fit):,}/{len(splits.train):,}", flush=True)
     ytr = train_fit["demand"].astype(float)
 
     results = []
@@ -165,13 +170,15 @@ def main():
                     help="trees for B/C fast ranking (baseline A uses its full 1500)")
     ap.add_argument("--sample", type=float, default=0.35,
                     help="train subsample fraction for B/C fast ranking (val/test stay full)")
-    ap.add_argument("--objectives", choices=["poisson", "poisson_l1"], default="poisson",
-                    help="poisson = fast ranking (default); poisson_l1 = baseline-faithful but slow")
+    ap.add_argument("--objectives", choices=["poisson", "l1", "poisson_l1"], default="poisson",
+                    help="poisson = fast (mean); l1 = median (best for sparse unseen); poisson_l1 = both")
     ap.add_argument("--recompute-baseline", action="store_true",
                     help="re-train the baseline instead of using recorded Step-1 numbers")
+    ap.add_argument("--no-weight", action="store_true",
+                    help="drop city-balanced sample weights (keeps regression_l1 fast)")
     args = ap.parse_args()
     run(args.n_jobs, args.val_fraction, args.rebuild, args.n_estimators, args.sample,
-        args.objectives, args.recompute_baseline)
+        args.objectives, args.recompute_baseline, args.no_weight)
 
 
 if __name__ == "__main__":
