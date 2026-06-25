@@ -1,0 +1,24 @@
+# Data — never commit the dataset (large; provided separately)
+dataset/*.csv
+dataset/*.zip
+!dataset/.gitkeep
+
+# Trained artifacts
+*.joblib
+mae_by_city.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

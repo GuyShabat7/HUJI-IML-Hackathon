@@ -1,0 +1,21 @@
+TODO_NAME_ONE,TODO_NAME_TWO
+TODO_ID_ONE,TODO_ID_TWO
+
+Bike-demand forecasting model.
+
+Approach: ride-level logs are aggregated into station-hour demand, reconstructing
+the zero-demand daytime hours (06:00-22:00) inside each station's active window so
+the training distribution matches the evaluator's. Features combine cyclical time
+encodings (hour/weekday sin-cos), weather, calendar flags, and OSM station metadata,
+plus hierarchical mean-demand target encodings with graceful fallback
+(station x hour-of-week -> station -> city x hour-of-week -> city -> global). This
+fallback chain is what lets the model generalize to sparse/unseen stations and
+cities. Two LightGBM regressors are trained (objective="poisson" and
+objective="regression_l1") and averaged; predictions are clipped to be non-negative.
+
+Reproduce:
+    cd submissions/challenge_1_IDs
+    python train.py        # reads ../../dataset/train_set.csv, writes weights.joblib
+
+Rename this folder to challenge_1_<ID1>_<ID2> before submitting, and fill in the
+team names (line 1) and IDs (line 2) above.
