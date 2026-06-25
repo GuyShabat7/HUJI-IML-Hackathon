@@ -31,7 +31,9 @@ def _extract(osm, cf):
         g = None
     return g if g is not None and len(g) else None
 
-def compute_from_pbf(pbf, station_ids, lats, lngs, lat0=None, lng0=None):
+def compute_from_pbf(pbf, station_ids, lats, lngs, lat0=None, lng0=None, bbox=None):
+    """``bbox`` = [west, south, east, north] limits parsing to a region (e.g. one city) —
+    essential when the extract covers a whole state/country, else pyrosm loads everything."""
     lats = np.asarray(lats, float); lngs = np.asarray(lngs, float)
     if lat0 is None:
         lat0, lng0 = float(np.nanmean(lats)), float(np.nanmean(lngs))
@@ -40,7 +42,7 @@ def compute_from_pbf(pbf, station_ids, lats, lngs, lat0=None, lng0=None):
     to_m = lambda geom: shp_transform(lambda x, y, z=None: fwd.transform(x, y), geom)
     sx, sy = fwd.transform(lngs, lats)
 
-    osm = pyrosm.OSM(pbf)
+    osm = pyrosm.OSM(pbf, bounding_box=bbox) if bbox else pyrosm.OSM(pbf)
     layers = {k: _extract(osm, cf) for k, cf in CATS.items()}
 
     def centroids_tree(gdf):

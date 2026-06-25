@@ -120,8 +120,14 @@ def compute_poi(stations: pd.DataFrame, centroid, pbf: str | None = None) -> pd.
         poi = pd.read_pickle(pf)
     elif pbf:
         import osm_poi_local
+        # bbox-limit pyrosm to the station footprint (+~2 km) so a state/country-wide
+        # extract doesn't load the entire region.
+        m = 0.02
+        bbox = [float(coords["start_lng"].min()) - m, float(coords["start_lat"].min()) - m,
+                float(coords["start_lng"].max()) + m, float(coords["start_lat"].max()) + m]
         poi = osm_poi_local.compute_from_pbf(pbf, coords["start_station_id"].tolist(),
-                                             coords["start_lat"].values, coords["start_lng"].values)
+                                             coords["start_lat"].values, coords["start_lng"].values,
+                                             bbox=bbox)
         poi.to_pickle(pf)
     else:
         rows = osm_poi.compute(coords["start_station_id"].tolist(),
