@@ -30,6 +30,8 @@ def main() -> None:
                     help="override base-model tree count (default: full recipe)")
     ap.add_argument("--n-mask-augment", type=int, default=0,
                     help="missingness-augmentation rounds for the orchestrator (0 = off)")
+    ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"],
+                    help="XGBoost device: auto (GPU if available) | cpu | cuda")
     args = ap.parse_args()
 
     n_estimators = args.n_estimators
@@ -46,7 +48,8 @@ def main() -> None:
           f"mean_demand={table['demand'].mean():.3f}  n_jobs={n_jobs}  "
           f"fast={args.fast}  n_estimators={n_estimators or 'default'}  n_mask_augment={n_mask_augment}")
     artifacts = train_artifacts(table, n_jobs=n_jobs,
-                                n_estimators=n_estimators, n_mask_augment=n_mask_augment)
+                                n_estimators=n_estimators, n_mask_augment=n_mask_augment,
+                                device=args.device)
 
     joblib.dump(artifacts, OUTPUT_WEIGHTS)
     print(f"Saved {OUTPUT_WEIGHTS}")

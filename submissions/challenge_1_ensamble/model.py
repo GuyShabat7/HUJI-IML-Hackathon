@@ -38,6 +38,27 @@ ORCH_PARAMS = dict(objective="reg:squarederror", n_estimators=400, learning_rate
                    tree_method="hist", random_state=42)
 
 
+def _resolve_device(device: str = "auto") -> str:
+    """Pick the XGBoost device. 'auto' uses a GPU if one is usable, else CPU.
+
+    Override with the env var XGB_DEVICE=cpu|cuda. A model trained on GPU still predicts
+    fine on a CPU-only grader, so inference is unaffected.
+    """
+    if device and device != "auto":
+        return device
+    import os, shutil, subprocess
+    if os.environ.get("XGB_DEVICE"):
+        return os.environ["XGB_DEVICE"]
+    # XGBoost silently falls back GPU->CPU (only warns), so probe the driver directly.
+    if shutil.which("nvidia-smi"):
+        try:
+            subprocess.run(["nvidia-smi"], capture_output=True, timeout=8, check=True)
+            return "cuda"
+        except Exception:
+            return "cpu"
+    return "cpu"
+
+
 def _ensure_ts(df: pd.DataFrame) -> pd.DataFrame:
     """Add a floored hourly ``ts`` from whatever timestamp the row carries (no mutation of caller)."""
     out = df.copy()
@@ -70,17 +91,22 @@ def _orch_matrix(df, base_models, base_cols):
 
 
 def train_artifacts(train_df: pd.DataFrame, n_jobs: int = -1, seed: int = 42,
-                    n_estimators: int | None = None, n_mask_augment: int = 0) -> dict:
+                    n_estimators: int | None = None, n_mask_augment: int = 0,
+                    device: str = "auto") -> dict:
     """Fit the 3 base models + the orchestrator. Returns the artifacts dict for predict.
 
     n_estimators   : override the base models' tree count (e.g. small for a --fast run).
     n_mask_augment : rounds of missingness augmentation for the orchestrator — copies of
                      the OOF training rows with one category neutralised + its miss-flag set,
                      so the gate learns to cope when a whole category is absent (0 = off).
+    device         : 'auto' (GPU if available, else CPU) | 'cpu' | 'cuda'.
     """
     from sklearn.model_selection import KFold
 
-    base_params = dict(BASE_PARAMS)
+    dev = _resolve_device(device)
+    print(f"[train_artifacts] xgboost device = {dev}")
+    base_params = dict(BASE_PARAMS, device=dev)
+    orch_params = dict(ORCH_PARAMS, device=dev)
     if n_estimators:
         base_params["n_estimators"] = int(n_estimators)
 
@@ -117,7 +143,7 @@ def train_artifacts(train_df: pd.DataFrame, n_jobs: int = -1, seed: int = 42,
         Zfit = pd.concat(parts_Z, ignore_index=True)
         yfit = np.concatenate(parts_y)
 
-    orch = xgb.XGBRegressor(n_jobs=n_jobs, **ORCH_PARAMS)
+    orch = xgb.XGBRegressor(n_jobs=n_jobs, **orch_params)
     orch.fit(Zfit, yfit)
 
     # 2) Refit the base models on ALL of train for deployment.
