@@ -139,10 +139,8 @@ cd submissions/challenge_1_IDs && python train.py
 
 The `enrichment/` folder holds the reusable lookups and scripts used to build all this:
 per-city `*_station_features.csv` (POI) and `*_weather_2025.csv`, plus `enrich.py`
-(joins features + weather + calendar onto any ride file) and the fetch/POI builders.
-[`tools/build_supplementary_london.py`](tools/build_supplementary_london.py) is a lighter,
-self-contained alternative that enriches a single raw release (any city via `--city`)
-straight to the `train_set.csv` schema.
+(joins features + weather + calendar onto any ride file, `--city` for each) and the
+fetch/POI builders. This is the single canonical enricher.
 
 **Two ways to consume the enriched data**
 

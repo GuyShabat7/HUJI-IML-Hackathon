@@ -87,15 +87,13 @@ These come straight from the EDA and directly shape the implementation:
         (TfL station numbers ↔ `start_station_id`, see [README.md](README.md#supplementary-data--full-year-london)),
         which lets us recompute the `*_500m`/`*_1000m` counts and distances.
   - [x] **✅ Rules: APPROVED.** Course confirmed external data may be used for **training and validation**.
-        Enrichment stays reproducible (scripts under `tools/`) and **never overwrites `dataset/train_set.csv`**.
-        The single hard rule: **`city 3` stays hidden during training.**
-  - [x] **Supplemental ENABLED BY DEFAULT (training + validation)** —
-        [`tools/build_supplementary_london.py`](tools/build_supplementary_london.py) enriches any raw release
-        (London via the [full-year release](README.md#supplementary-data--full-year-london); other cities via
-        `--city`) back to the `train_set.csv` schema (calendar rebuilt locally incl. US-federal `holiday_name`;
-        station meta + train-range weather back-filled from `train_set.csv`; `--weather openmeteo` fetches the
-        full range — the transferable win, a warm-season temp→demand curve for M_weather) and writes to
-        `dataset/supplemental/`. The harness ([`data.py`](submissions/challenge_1_ensamble/data.py)
+        Enrichment stays reproducible (the [`enrichment/`](enrichment/) pipeline) and **never overwrites
+        `dataset/train_set.csv`**. The single hard rule: **`city 3` stays hidden during training.**
+  - [x] **Supplemental ENABLED BY DEFAULT (training + validation)** — the single canonical enricher
+        [`enrichment/enrich.py`](enrichment/enrich.py) joins POI + weather + calendar onto any raw release
+        (`--city` per city; full-year, all-season, real London OSM POI — see [README §Added Data](README.md#added-data--enrichment))
+        producing the `train_set.csv` schema. Drop the enriched CSVs into `dataset/supplemental/` and the
+        harness ([`data.py`](submissions/challenge_1_ensamble/data.py)
         `load_splits`, default `supplemental="auto"`) **auto-discovers** every CSV there, pools it with the
         official data (exact station-hour overlaps de-duped, official kept), then runs the per-city temporal
         split — so supplemental rows appear in **both train and val** (`is_supplementary` flag on every row).
@@ -132,14 +130,12 @@ The target does not exist in the raw data; **build it by aggregation**, reconstr
 - [x] **Labeled validation set:** built **directly** — `build_station_hour_table` already attaches `demand`
   to every station-hour, so `load_splits().val` carries features + labels in-memory (equivalent to the
   `build_station_hour_eval_data.py` public/private + join-on-`id` route, without the CSV round-trip).
-  - [x] **Supplementary-data check (per request):** by **default** the harness reads **only**
-        `dataset/train_set.csv` and does **not** pull the full-year London release
-        ([README §Supplementary Data](README.md#supplementary-data--full-year-london)) — that data is
-        London-only, opt-in, and rules-gated, with **no** equivalent for city 3. An **opt-in** path now
-        exists ([`tools/build_supplementary_london.py`](tools/build_supplementary_london.py) →
-        `load_splits(extra_train_csv=…)`, see §4) for the moment rules clear. Either way **city 3 stays a
-        genuine unknown**: held out whole as `test_unseen` and protected by a hard leakage guard in
-        `load_splits` so no enriched/extended source can ever carry city-3 rows into train/val.
+  - [x] **Supplemental data (approved):** external data is enabled for training + validation. The harness
+        auto-discovers enriched CSVs in `dataset/supplemental/` (produced by the canonical
+        [`enrichment/`](enrichment/) pipeline; see §4) and pools them with `dataset/train_set.csv` for the
+        split. **City 3 stays a genuine unknown**: pulled out whole as `test_unseen` and protected by a hard
+        guard in `load_splits` so no source — official or supplemental — can carry city-3 rows into
+        train/val. `supplemental=None` reproduces the official-only numbers.
 - [x] Cache intermediate frames under `submissions/challenge_1_ensamble/_cache/` (gitignored). →
   signature-checked `data.build_or_load_table()` (rebuilds only when `train_set.csv` changes).
 

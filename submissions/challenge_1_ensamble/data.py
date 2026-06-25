@@ -60,7 +60,8 @@ TABLE_CACHE_META = CACHE_DIR / "station_hour_table.meta.json"
 # training + validation). Any train_set.csv-schema CSV dropped here is auto-merged
 # into the pool and split like official data — see load_splits(). The directory is
 # gitignored and may be empty/absent (then the harness falls back to train_set.csv
-# only). Produce sources with tools/build_supplementary_london.py (any city).
+# only). Produce sources with the enrichment/ pipeline (enrichment/enrich.py, any
+# city) or download an enriched release (README §Added Data) into this folder.
 SUPPLEMENTAL_DIR = DATA_ROOT / "supplemental"
 
 # Daytime hours kept by the evaluator (build_station_hour_eval_data.py uses
